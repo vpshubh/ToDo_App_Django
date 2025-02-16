@@ -1,346 +1,353 @@
 import tkinter as tk
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import ttk, messagebox
+from tkcalendar import DateEntry
 import sqlite3
-from datetime import datetime, timedelta
-import csv
+from datetime import datetime
 
-# Connect to the database
+# ================= Constants & Styles =================
+COLOR_SCHEME = {
+    "primary": "#2c3e50",
+    "secondary": "#34495e",
+    "accent": "#3498db",
+    "success": "#27ae60",
+    "warning": "#f1c40f",
+    "danger": "#e74c3c",
+    "light": "#ecf0f1",
+    "dark": "#2c3e50",
+    "text": "#ffffff"
+}
+
+FONT_SCHEME = {
+    "title": ("Segoe UI", 16, "bold"),
+    "body": ("Segoe UI", 12),
+    "button": ("Segoe UI", 11, "bold"),
+    "small": ("Segoe UI", 10)
+}
+
+PADDING = {
+    "xsmall": 3,
+    "small": 5,
+    "medium": 10,
+    "large": 15
+}
+
+TIME_OPTIONS = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 15, 30, 45)]
+
+# ================= Database Setup =================
 conn = sqlite3.connect("todo.db")
 cursor = conn.cursor()
 
-# Create tasks table
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task TEXT NOT NULL,
     due_date TEXT,
+    due_time TEXT,
     priority TEXT,
     category TEXT,
     completed INTEGER DEFAULT 0
 )
 """)
+
+# Check for missing columns
+cursor.execute("PRAGMA table_info(tasks)")
+columns = [column[1] for column in cursor.fetchall()]
+if 'due_time' not in columns:
+    cursor.execute("ALTER TABLE tasks ADD COLUMN due_time TEXT")
+if 'category' not in columns:
+    cursor.execute("ALTER TABLE tasks ADD COLUMN category TEXT")
+
 conn.commit()
 
-# ================= UI Helpers =================
-class ToolTip:
-    def __init__(self, widget, text):
-        self.widget = widget
-        self.text = text
-        self.tip_window = None
-        self.widget.bind("<Enter>", self.show_tip)
-        self.widget.bind("<Leave>", self.hide_tip)
-
-    def show_tip(self, event=None):
-        x, y, _, _ = self.widget.bbox("insert")
-        x += self.widget.winfo_rootx() + 25
-        y += self.widget.winfo_rooty() + 25
-        
-        self.tip_window = tk.Toplevel(self.widget)
-        self.tip_window.wm_overrideredirect(True)
-        self.tip_window.wm_geometry(f"+{x}+{y}")
-        
-        label = tk.Label(self.tip_window, text=self.text, justify=tk.LEFT,
-                        background="#ffffe0", relief=tk.SOLID, borderwidth=1,
-                        font=("Arial", 10))
-        label.pack()
-
-    def hide_tip(self, event=None):
-        if self.tip_window:
-            self.tip_window.destroy()
-            self.tip_window = None
-
-def add_placeholder(entry, placeholder, color="grey"):
-    entry.insert(0, placeholder)
-    entry.config(fg=color)
-    
-    def on_focus_in(event):
-        if entry.get() == placeholder:
-            entry.delete(0, tk.END)
-            entry.config(fg="black")
-    
-    def on_focus_out(event):
-        if not entry.get():
-            entry.insert(0, placeholder)
-            entry.config(fg=color)
-    
-    entry.bind("<FocusIn>", on_focus_in)
-    entry.bind("<FocusOut>", on_focus_out)
-
 # ================= Main Application =================
-root = tk.Tk()
-root.title("To-Do App")
-root.minsize(800, 600)
-root.columnconfigure(0, weight=1)
-root.rowconfigure(0, weight=1)
+class TodoApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Modern To-Do App")
+        self.root.geometry("800x600")
+        self.sort_column = None
+        self.sort_reverse = False
+        
+        # Create main frames
+        self.input_frame = tk.Frame(root, bg=COLOR_SCHEME["primary"])
+        self.view_frame = tk.Frame(root, bg=COLOR_SCHEME["primary"])
+        
+        self.setup_input_view()
+        self.setup_full_view()
+        self.show_input_view()
+        self.refresh_tasks()
 
-# ================= Help System =================
-def show_help():
-    help_text = """📘 To-Do App Guide
-    
-    🆕 Adding Tasks:
-    1. Type your task in the 'Task' field
-    2. (Optional) Add due date in YYYY-MM-DD format
-    3. Select priority level and category
-    4. Click ➕ Add Task
-    
-    🛠 Managing Tasks:
-    • ✓ Complete: Select task and click to mark done
-    • 🗑 Delete: Remove selected task
-    • 🔍 Filter: Show tasks by priority/category
-    • 🗃 Sort: Organize by due date or priority
-    • 🗑️ Clear All: Remove all tasks (careful!)
-    
-    📤 Exporting:
-    • Click Export CSV to save as spreadsheet
-    • File saved as tasks.csv in app directory
-    
-    💡 Pro Tips:
-    • Hover over fields for more info
-    • Completed tasks show ✔ marker
-    • Empty due date = no deadline
-    • Use YYYY-MM-DD for reliable date sorting"""
-    
-    help_window = tk.Toplevel(root)
-    help_window.title("Help Guide")
-    help_window.geometry("500x400")
-    
-    text_frame = tk.Frame(help_window)
-    text_frame.pack(padx=20, pady=20, fill=tk.BOTH, expand=True)
-    
-    help_label = tk.Text(text_frame, wrap=tk.WORD, font=("Arial", 11), padx=10, pady=10)
-    help_label.insert(tk.END, help_text)
-    help_label.config(state=tk.DISABLED)
-    help_label.pack(fill=tk.BOTH, expand=True)
+    def setup_input_view(self):
+        input_container = tk.Frame(self.input_frame, bg=COLOR_SCHEME["primary"])
+        input_container.pack(pady=50, padx=50, fill=tk.BOTH, expand=True)
 
-# ================= UI Layout =================
-main_frame = tk.Frame(root)
-main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        # Header
+        header = tk.Label(input_container, text="Add New Task", 
+                         bg=COLOR_SCHEME["secondary"], fg=COLOR_SCHEME["text"],
+                         font=FONT_SCHEME["title"], padx=20, pady=10)
+        header.pack(fill=tk.X)
 
-# Listbox with scrollbar
-listbox_frame = tk.Frame(main_frame)
-listbox_frame.pack(fill=tk.BOTH, expand=True)
+        # Task Input
+        task_frame = tk.Frame(input_container, bg=COLOR_SCHEME["primary"])
+        task_frame.pack(pady=PADDING["medium"], fill=tk.X)
+        tk.Label(task_frame, text="Task:", bg=COLOR_SCHEME["primary"], 
+                fg=COLOR_SCHEME["text"], font=FONT_SCHEME["body"]).pack(side=tk.LEFT)
+        self.task_entry = tk.Entry(task_frame, font=FONT_SCHEME["body"], 
+                                  bg=COLOR_SCHEME["light"], width=40)
+        self.task_entry.pack(side=tk.LEFT, padx=PADDING["medium"])
 
-scrollbar = tk.Scrollbar(listbox_frame)
-scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # Date and Time
+        datetime_frame = tk.Frame(input_container, bg=COLOR_SCHEME["primary"])
+        datetime_frame.pack(pady=PADDING["medium"], fill=tk.X)
+        
+        # Date Picker
+        tk.Label(datetime_frame, text="Due Date:", bg=COLOR_SCHEME["primary"], 
+                fg=COLOR_SCHEME["text"], font=FONT_SCHEME["body"]).pack(side=tk.LEFT)
+        self.due_date_cal = DateEntry(
+            datetime_frame,
+            date_pattern="yyyy-mm-dd",
+            font=FONT_SCHEME["body"],
+            background=COLOR_SCHEME["dark"],
+            foreground=COLOR_SCHEME["text"],
+            borderwidth=1,
+            relief=tk.FLAT
+        )
+        self.due_date_cal.pack(side=tk.LEFT, padx=PADDING["medium"])
 
-task_listbox = tk.Listbox(
-    listbox_frame, 
-    yscrollcommand=scrollbar.set,
-    font=("Arial", 12),
-    selectbackground="#e1f5fe",
-    selectforeground="#000000"
-)
-task_listbox.pack(fill=tk.BOTH, expand=True)
-scrollbar.config(command=task_listbox.yview)
+        # Time Picker
+        tk.Label(datetime_frame, text="Time:", bg=COLOR_SCHEME["primary"], 
+                fg=COLOR_SCHEME["text"], font=FONT_SCHEME["body"]).pack(side=tk.LEFT)
+        self.due_time_combo = ttk.Combobox(
+            datetime_frame,
+            values=TIME_OPTIONS,
+            font=FONT_SCHEME["body"],
+            state="readonly",
+            width=8
+        )
+        self.due_time_combo.set("00:00")
+        self.due_time_combo.pack(side=tk.LEFT, padx=PADDING["medium"])
 
-# Input fields
-input_frame = tk.Frame(main_frame)
-input_frame.pack(fill=tk.X, pady=10)
+        # Priority & Category
+        dropdown_frame = tk.Frame(input_container, bg=COLOR_SCHEME["primary"])
+        dropdown_frame.pack(pady=PADDING["medium"], fill=tk.X)
+        
+        # Priority
+        tk.Label(dropdown_frame, text="Priority:", bg=COLOR_SCHEME["primary"], 
+                fg=COLOR_SCHEME["text"], font=FONT_SCHEME["body"]).pack(side=tk.LEFT)
+        self.priority_combo = ttk.Combobox(
+            dropdown_frame,
+            values=["Low", "Medium", "High"],
+            font=FONT_SCHEME["body"],
+            state="readonly",
+            width=10
+        )
+        self.priority_combo.set("Medium")
+        self.priority_combo.pack(side=tk.LEFT, padx=PADDING["medium"])
 
-tk.Label(input_frame, text="Task:", width=8, anchor="w").pack(side=tk.LEFT)
-task_entry = tk.Entry(input_frame, font=("Arial", 12))
-task_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-add_placeholder(task_entry, "e.g., Buy groceries...")
+        # Category
+        tk.Label(dropdown_frame, text="Category:", bg=COLOR_SCHEME["primary"], 
+                fg=COLOR_SCHEME["text"], font=FONT_SCHEME["body"]).pack(side=tk.LEFT)
+        self.category_combo = ttk.Combobox(
+            dropdown_frame,
+            values=["Work", "Personal", "Shopping", "Other"],
+            font=FONT_SCHEME["body"],
+            state="readonly",
+            width=10
+        )
+        self.category_combo.set("Work")
+        self.category_combo.pack(side=tk.LEFT, padx=PADDING["medium"])
 
-tk.Label(input_frame, text="Due Date:", width=8, anchor="w").pack(side=tk.LEFT)
-due_date_entry = tk.Entry(input_frame, font=("Arial", 12))
-due_date_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-add_placeholder(due_date_entry, "YYYY-MM-DD (optional)")
+        # Buttons
+        add_btn = tk.Button(input_container, text="➕ Add Task", command=self.add_task,
+                           bg=COLOR_SCHEME["success"], fg=COLOR_SCHEME["text"],
+                           font=FONT_SCHEME["button"], relief=tk.FLAT, padx=20)
+        add_btn.pack(pady=PADDING["large"])
 
-# Dropdowns
-dropdown_frame = tk.Frame(main_frame)
-dropdown_frame.pack(fill=tk.X, pady=5)
+        view_btn = tk.Button(input_container, text="📋 View All Tasks", 
+                            command=self.show_full_view,
+                            bg=COLOR_SCHEME["accent"], fg=COLOR_SCHEME["text"],
+                            font=FONT_SCHEME["button"], relief=tk.FLAT)
+        view_btn.pack(pady=PADDING["medium"])
 
-priority_options = ["Low", "Medium", "High"]
-tk.Label(dropdown_frame, text="Priority:").pack(side=tk.LEFT)
-priority_combobox = ttk.Combobox(dropdown_frame, values=priority_options, width=12)
-priority_combobox.pack(side=tk.LEFT, padx=5)
-priority_combobox.set("Medium")
-ToolTip(priority_combobox, "Task urgency level:\nLow - Normal priority\nMedium - Important\nHigh - Critical")
+    def setup_full_view(self):
+        view_container = tk.Frame(self.view_frame, bg=COLOR_SCHEME["primary"])
+        view_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
 
-category_options = ["Work", "Personal", "Shopping", "Other"]
-tk.Label(dropdown_frame, text="Category:").pack(side=tk.LEFT)
-category_combobox = ttk.Combobox(dropdown_frame, values=category_options, width=12)
-category_combobox.pack(side=tk.LEFT, padx=5)
-category_combobox.set("Work")
-ToolTip(category_combobox, "Task category:\nWork - Job related\nPersonal - Private\nShopping - Purchases\nOther - Miscellaneous")
+        # Back Button
+        back_btn = tk.Button(view_container, text="← Back to Add Task", 
+                            command=self.show_input_view,
+                            bg=COLOR_SCHEME["secondary"], fg=COLOR_SCHEME["text"],
+                            font=FONT_SCHEME["button"], relief=tk.FLAT)
+        back_btn.pack(anchor="nw", pady=10)
 
-# Action buttons
-button_frame = tk.Frame(main_frame)
-button_frame.pack(fill=tk.X, pady=10)
+        # Treeview Container
+        tree_container = tk.Frame(view_container)
+        tree_container.pack(fill=tk.BOTH, expand=True)
 
-btn_style = {"width": 15, "height": 1}
+        # Treeview Style
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("Treeview", 
+                        background=COLOR_SCHEME["light"],
+                        fieldbackground=COLOR_SCHEME["light"],
+                        font=FONT_SCHEME["body"],
+                        rowheight=30)
+        style.configure("Treeview.Heading", 
+                        background=COLOR_SCHEME["secondary"],
+                        foreground=COLOR_SCHEME["text"],
+                        font=FONT_SCHEME["button"])
+        style.map("Treeview", background=[("selected", COLOR_SCHEME["accent"])])
 
-add_btn = tk.Button(button_frame, text="➕ Add Task", **btn_style, bg="#c8e6c9")
-add_btn.pack(side=tk.LEFT, padx=5)
+        # Task Tree
+        self.task_tree = ttk.Treeview(tree_container, 
+                                    columns=("ID", "Task", "Due Date", "Time", "Priority", "Category", "Status"), 
+                                    show="headings", selectmode="browse")
+        
+        # Configure columns
+        columns = ("ID", "Task", "Due Date", "Time", "Priority", "Category", "Status")
+        for col in columns:
+            self.task_tree.heading(col, text=col, anchor="w", 
+                                  command=lambda c=col: self.treeview_sort_column(c))
+            self.task_tree.column(col, anchor="w")
 
-complete_btn = tk.Button(button_frame, text="✓ Complete", **btn_style, bg="#fff9c4")
-complete_btn.pack(side=tk.LEFT, padx=5)
+        self.task_tree.column("ID", width=80)
+        self.task_tree.column("Task", width=400)
+        self.task_tree.column("Due Date", width=150)
+        self.task_tree.column("Time", width=100)
+        self.task_tree.column("Priority", width=120)
+        self.task_tree.column("Category", width=150)
+        self.task_tree.column("Status", width=120)
+        
+        # Scrollbars
+        vsb = ttk.Scrollbar(tree_container, orient="vertical", command=self.task_tree.yview)
+        hsb = ttk.Scrollbar(tree_container, orient="horizontal", command=self.task_tree.xview)
+        self.task_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        
+        # Layout using grid
+        self.task_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        
+        tree_container.grid_rowconfigure(0, weight=1)
+        tree_container.grid_columnconfigure(0, weight=1)
 
-delete_btn = tk.Button(button_frame, text="🗑 Delete", **btn_style, bg="#ffcdd2")
-delete_btn.pack(side=tk.LEFT, padx=5)
+    def show_input_view(self):
+        self.view_frame.pack_forget()
+        self.input_frame.pack(fill=tk.BOTH, expand=True)
+        self.root.geometry("800x600")
 
-# Filter/Sort buttons
-action_frame = tk.Frame(main_frame)
-action_frame.pack(fill=tk.X, pady=5)
+    def show_full_view(self):
+        self.input_frame.pack_forget()
+        self.view_frame.pack(fill=tk.BOTH, expand=True)
+        self.root.geometry("1200x800")
+        self.refresh_tasks()
 
-filter_priority_btn = tk.Button(action_frame, text="🔍 Filter Priority", width=15)
-filter_priority_btn.pack(side=tk.LEFT, padx=2)
+    def add_task(self):
+        task = self.task_entry.get()
+        due_date = self.due_date_cal.get_date().strftime("%Y-%m-%d")
+        due_time = self.due_time_combo.get()
+        priority = self.priority_combo.get()
+        category = self.category_combo.get()
 
-filter_category_btn = tk.Button(action_frame, text="🔍 Filter Category", width=15)
-filter_category_btn.pack(side=tk.LEFT, padx=2)
+        if task:
+            cursor.execute("""
+                INSERT INTO tasks (task, due_date, due_time, priority, category)
+                VALUES (?, ?, ?, ?, ?)
+            """, (task, due_date, due_time, priority, category))
+            conn.commit()
+            self.task_entry.delete(0, tk.END)
+            messagebox.showinfo("Success", "Task added successfully!")
+            self.show_full_view()
+        else:
+            messagebox.showwarning("Input Error", "Task description cannot be empty")
 
-sort_due_date_btn = tk.Button(action_frame, text="🗓 Sort Due Date", width=15)
-sort_due_date_btn.pack(side=tk.LEFT, padx=2)
-
-sort_priority_btn = tk.Button(action_frame, text="❗ Sort Priority", width=15)
-sort_priority_btn.pack(side=tk.LEFT, padx=2)
-
-# Bottom buttons
-bottom_frame = tk.Frame(main_frame)
-bottom_frame.pack(fill=tk.X, pady=10)
-
-export_btn = tk.Button(bottom_frame, text="📤 Export CSV", width=12)
-export_btn.pack(side=tk.LEFT, padx=5)
-
-check_due_dates_btn = tk.Button(bottom_frame, text="📅 Check Due Dates", width=14)
-check_due_dates_btn.pack(side=tk.LEFT, padx=5)
-
-clear_all_btn = tk.Button(bottom_frame, text="⚠️ Clear All", width=12)
-clear_all_btn.pack(side=tk.LEFT, padx=5)
-
-help_btn = tk.Button(bottom_frame, text="❓ Help", width=8, command=show_help)
-help_btn.pack(side=tk.RIGHT, padx=5)
-
-# ================= Core Functionality =================
-def validate_due_date(due_date):
-    try:
-        datetime.strptime(due_date, "%Y-%m-%d")
-        return True
-    except ValueError:
-        return False
-
-def add_task():
-    task = task_entry.get()
-    due_date = due_date_entry.get()
-    priority = priority_combobox.get()
-    category = category_combobox.get()
-
-    if task and task != "e.g., Buy groceries...":
-        if due_date and due_date != "YYYY-MM-DD (optional)" and not validate_due_date(due_date):
-            messagebox.showwarning("Warning", "Invalid date format. Use YYYY-MM-DD")
-            return
+    def refresh_tasks(self):
+        for item in self.task_tree.get_children():
+            self.task_tree.delete(item)
             
-        cursor.execute("""
-            INSERT INTO tasks (task, due_date, priority, category)
-            VALUES (?, ?, ?, ?)
-        """, (task, due_date, priority, category))
-        conn.commit()
-        task_entry.delete(0, tk.END)
-        due_date_entry.delete(0, tk.END)
-        refresh_tasks()
-    else:
-        messagebox.showwarning("Warning", "Please enter a valid task")
-
-def refresh_tasks():
-    task_listbox.delete(0, tk.END)
-    cursor.execute("SELECT id, task, due_date, priority, category, completed FROM tasks")
-    tasks = cursor.fetchall()
-    for task in tasks:
-        task_id, task_text, due_date, priority, category, completed = task
-        status = " ✔" if completed else ""
-        task_listbox.insert(tk.END, 
-            f"[{task_id}] {task_text} | Due: {due_date} | {priority} priority | {category}{status}")
-
-def complete_task():
-    try:
-        selected = task_listbox.get(task_listbox.curselection())
-        task_id = selected.split("]")[0][1:]
-        cursor.execute("UPDATE tasks SET completed = 1 WHERE id = ?", (task_id,))
-        conn.commit()
-        refresh_tasks()
-    except:
-        messagebox.showwarning("Warning", "Please select a task first")
-
-def delete_task():
-    try:
-        selected = task_listbox.get(task_listbox.curselection())
-        task_id = selected.split("]")[0][1:]
-        cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-        conn.commit()
-        refresh_tasks()
-    except:
-        messagebox.showwarning("Warning", "Please select a task to delete")
-
-def filter_tasks(criteria):
-    filter_value = simpledialog.askstring("Filter", f"Enter {criteria}:")
-    if filter_value:
-        task_listbox.delete(0, tk.END)
-        cursor.execute(f"SELECT * FROM tasks WHERE {criteria}=?", (filter_value,))
+        cursor.execute("SELECT id, task, due_date, due_time, priority, category, completed FROM tasks")
         tasks = cursor.fetchall()
         for task in tasks:
-            task_id, task_text, due_date, priority, category, completed = task
-            status = " ✔" if completed else ""
-            task_listbox.insert(tk.END, 
-                f"[{task_id}] {task_text} | Due: {due_date} | {priority} priority | {category}{status}")
+            status = "Complete" if task[6] else "Pending"
+            self.task_tree.insert("", "end", values=(
+                task[0], task[1], task[2], task[3], task[4], task[5], status),
+                tags=("complete" if task[6] else "pending"))
+            
+        self.task_tree.tag_configure("complete", background="#e8f5e9")
+        self.task_tree.tag_configure("pending", background="#fffde7")
 
-def sort_tasks(criteria):
-    task_listbox.delete(0, tk.END)
-    cursor.execute(f"SELECT * FROM tasks ORDER BY {criteria}")
-    tasks = cursor.fetchall()
-    for task in tasks:
-        task_id, task_text, due_date, priority, category, completed = task
-        status = " ✔" if completed else ""
-        task_listbox.insert(tk.END, 
-            f"[{task_id}] {task_text} | Due: {due_date} | {priority} priority | {category}{status}")
+    def treeview_sort_column(self, col):
+        data_type_converter = {
+            "ID": int,
+            "Due Date": lambda x: datetime.strptime(x, "%Y-%m-%d"),
+            "Time": lambda x: datetime.strptime(x, "%H:%M").time(),
+            "Priority": lambda x: {"Low": 1, "Medium": 2, "High": 3}[x],
+            "Status": lambda x: {"Complete": 1, "Pending": 2}[x],
+            "Task": str,
+            "Category": str
+        }
 
-def check_due_dates():
-    today = datetime.now().strftime("%Y-%m-%d")
-    cursor.execute("SELECT task, due_date FROM tasks WHERE due_date >= ? ORDER BY due_date", (today,))
-    tasks = cursor.fetchall()
-    if tasks:
-        message = "📅 Upcoming Tasks:\n\n"
-        for task, due_date in tasks:
-            message += f"• {task}\n  Due: {due_date}\n\n"
-        messagebox.showinfo("Upcoming Tasks", message)
-    else:
-        messagebox.showinfo("Upcoming Tasks", "No upcoming tasks found! 🎉")
+        if self.sort_column == col:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_column = col
+            self.sort_reverse = False
 
-def export_tasks():
-    with open('tasks.csv', 'w', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow(['ID', 'Task', 'Due Date', 'Priority', 'Category', 'Completed'])
-        cursor.execute("SELECT * FROM tasks")
-        tasks = cursor.fetchall()
-        for task in tasks:
-            writer.writerow(task)
-    messagebox.showinfo("Export Successful", "Tasks exported to:\ntasks.csv")
+        try:
+            converter = data_type_converter[col]
+        except KeyError:
+            converter = str
 
-def clear_all_tasks():
-    if messagebox.askyesno("Confirm Clear", "⚠️ This will delete ALL tasks!\nAre you absolutely sure?"):
-        cursor.execute("DELETE FROM tasks")
-        conn.commit()
-        refresh_tasks()
+        items = [(converter(self.task_tree.set(k, col)), k) 
+                for k in self.task_tree.get_children('')]
 
-# Connect all buttons
-add_btn.config(command=add_task)
-complete_btn.config(command=complete_task)
-delete_btn.config(command=delete_task)
-filter_priority_btn.config(command=lambda: filter_tasks("priority"))
-filter_category_btn.config(command=lambda: filter_tasks("category"))
-sort_due_date_btn.config(command=lambda: sort_tasks("due_date"))
-sort_priority_btn.config(command=lambda: sort_tasks("priority"))
-export_btn.config(command=export_tasks)
-check_due_dates_btn.config(command=check_due_dates)
-clear_all_btn.config(command=clear_all_tasks)
+        items.sort(reverse=self.sort_reverse)
 
-# Initial load
-refresh_tasks()
+        for index, (val, k) in enumerate(items):
+            self.task_tree.move(k, '', index)
 
-# Close handler
-def on_close():
+        self.update_sort_arrow(col)
+
+    def update_sort_arrow(self, col):
+        for column in self.task_tree["columns"]:
+            self.task_tree.heading(column, text=column)
+        arrow = " ↓" if self.sort_reverse else " ↑"
+        self.task_tree.heading(col, text=col + arrow)
+
+    def complete_task(self):
+        selected = self.task_tree.selection()
+        if selected:
+            task_id = self.task_tree.item(selected[0], "values")[0]
+            cursor.execute("UPDATE tasks SET completed = 1 WHERE id = ?", (task_id,))
+            conn.commit()
+            self.refresh_tasks()
+            messagebox.showinfo("Success", "Task marked as complete!")
+        else:
+            messagebox.showwarning("Selection Error", "Please select a task first")
+
+    def delete_task(self):
+        selected = self.task_tree.selection()
+        if selected:
+            task_id = self.task_tree.item(selected[0], "values")[0]
+            if messagebox.askyesno("Confirm Delete", "Delete this task permanently?"):
+                cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+                conn.commit()
+                self.refresh_tasks()
+                messagebox.showinfo("Success", "Task deleted successfully!")
+        else:
+            messagebox.showwarning("Selection Error", "Please select a task to delete")
+
+    def clear_all_tasks(self):
+        if messagebox.askyesno("Confirm Clear", "This will delete ALL tasks!\nAre you sure?"):
+            cursor.execute("DELETE FROM tasks")
+            cursor.execute("DELETE FROM sqlite_sequence WHERE name='tasks'")
+            conn.commit()
+            self.refresh_tasks()
+            messagebox.showinfo("Success", "All tasks cleared!")
+
+# ================= Run Application =================
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = TodoApp(root)
+    root.mainloop()
     conn.close()
-    root.destroy()
-
-root.protocol("WM_DELETE_WINDOW", on_close)
-root.mainloop()
